@@ -156,7 +156,7 @@ mavenPublishing {
     pom {
         name.set(rootProject.name)
         description.set("A simple mock oauth2 server based on OkHttp MockWebServer")
-        url.set("https://github.com/navikt/${rootProject.name}")
+        url.set("https://github.com/d-lopes/${rootProject.name}")
         licenses {
             license {
                 name.set("MIT License")
@@ -171,9 +171,9 @@ mavenPublishing {
             }
         }
         scm {
-            connection.set("scm:git:git://github.com/navikt/${rootProject.name}.git")
-            developerConnection.set("scm:git:ssh://github.com/navikt/${rootProject.name}.git")
-            url.set("https://github.com/navikt/${rootProject.name}")
+            connection.set("scm:git:git://github.com/d-lopes/${rootProject.name}.git")
+            developerConnection.set("scm:git:ssh://github.com/d-lopes/${rootProject.name}.git")
+            url.set("https://github.com/d-lopes/${rootProject.name}")
         }
     }
 }
@@ -182,7 +182,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/navikt/${rootProject.name}")
+            url = uri("https://maven.pkg.github.com/d-lopes/${rootProject.name}")
             credentials {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
