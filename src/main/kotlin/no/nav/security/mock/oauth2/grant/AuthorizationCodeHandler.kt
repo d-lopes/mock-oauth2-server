@@ -22,6 +22,7 @@ import no.nav.security.mock.oauth2.token.OAuth2TokenCallback
 import no.nav.security.mock.oauth2.token.OAuth2TokenProvider
 import no.nav.security.mock.oauth2.token.RequestMappingTokenCallback
 import okhttp3.HttpUrl
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.collections.set
 
 private val log = KotlinLogging.logger {}
@@ -31,8 +32,8 @@ internal class AuthorizationCodeHandler(
     private val tokenProvider: OAuth2TokenProvider,
     private val refreshTokenManager: RefreshTokenManager,
 ) : GrantHandler {
-    private val codeToAuthRequestCache: MutableMap<AuthorizationCode, AuthenticationRequest> = HashMap()
-    private val codeToLoginCache: MutableMap<AuthorizationCode, Login> = HashMap()
+    private val codeToAuthRequestCache: MutableMap<AuthorizationCode, AuthenticationRequest> = ConcurrentHashMap()
+    private val codeToLoginCache: MutableMap<AuthorizationCode, Login> = ConcurrentHashMap()
 
     fun authorizationCodeResponse(
         authenticationRequest: AuthenticationRequest,
@@ -57,10 +58,13 @@ internal class AuthorizationCodeHandler(
                     authenticationRequest.responseMode,
                 )
             }
-            else -> throw OAuth2Exception(
-                OAuth2Error.INVALID_GRANT,
-                "hybrid og implicit flow not supported (yet).",
-            )
+
+            else -> {
+                throw OAuth2Exception(
+                    OAuth2Error.INVALID_GRANT,
+                    "hybrid og implicit flow not supported (yet).",
+                )
+            }
         }
     }
 
@@ -72,8 +76,21 @@ internal class AuthorizationCodeHandler(
         val tokenRequest = request.asNimbusTokenRequest()
         val code = tokenRequest.authorizationCode()
         log.debug("issuing token for code=$code")
-        val authenticationRequest = takeAuthenticationRequestFromCache(code)
-        authenticationRequest?.verifyPkce(tokenRequest)
+
+        val authenticationRequest =
+            codeToAuthRequestCache.remove(code)
+                ?: throw OAuth2Exception(
+                    OAuth2Error.INVALID_GRANT.setDescription("unknown or already-used authorization code"),
+                    "unknown or already-used authorization code",
+                )
+
+        try {
+            authenticationRequest.verifyPkce(tokenRequest)
+        } catch (e: OAuth2Exception) {
+            codeToLoginCache.remove(code)
+            throw e
+        }
+
         val scope: String? = tokenRequest.scope?.toString()
         val nonce: String? = authenticationRequest?.nonce?.value
 
@@ -86,11 +103,10 @@ internal class AuthorizationCodeHandler(
                 ?.mapValues { it.value.joinToString(separator = " ") }
                 ?: emptyMap()
 
-        val enrichedCallback = oAuth2TokenCallback.withAuthRequestParams(authRequestParams)
-        val loginTokenCallbackOrDefault = getLoginTokenCallbackOrDefault(code, enrichedCallback)
-        val idToken: SignedJWT = tokenProvider.idToken(tokenRequest, issuerUrl, loginTokenCallbackOrDefault, nonce)
-        val accessToken: SignedJWT = tokenProvider.accessToken(tokenRequest, issuerUrl, loginTokenCallbackOrDefault, nonce)
-        val refreshToken: RefreshToken = refreshTokenManager.refreshToken(loginTokenCallbackOrDefault, nonce)
+        val loginTokenCallbackOrDefault = getLoginTokenCallbackOrDefault(code, oAuth2TokenCallback)
+        val idToken: SignedJWT = tokenProvider.idToken(tokenRequest, issuerUrl, loginTokenCallbackOrDefault, nonce, authRequestParams)
+        val accessToken: SignedJWT = tokenProvider.accessToken(tokenRequest, issuerUrl, loginTokenCallbackOrDefault, nonce, authRequestParams)
+        val refreshToken: RefreshToken = refreshTokenManager.refreshToken(loginTokenCallbackOrDefault, nonce, authRequestParams)
 
         return OAuth2TokenResponse(
             tokenType = "Bearer",
@@ -112,8 +128,6 @@ internal class AuthorizationCodeHandler(
 
     private fun takeLoginFromCache(code: AuthorizationCode): Login? = codeToLoginCache.remove(code)
 
-    private fun takeAuthenticationRequestFromCache(code: AuthorizationCode): AuthenticationRequest? = codeToAuthRequestCache.remove(code)
-
     private class LoginOAuth2TokenCallback(
         val login: Login,
         val oAuth2TokenCallback: OAuth2TokenCallback,
@@ -122,12 +136,23 @@ internal class AuthorizationCodeHandler(
 
         override fun subject(tokenRequest: TokenRequest): String = login.username
 
+        override fun subject(tokenRequest: TokenRequest, authRequestParams: Map<String, String>): String = login.username
+
         override fun typeHeader(tokenRequest: TokenRequest): String = oAuth2TokenCallback.typeHeader(tokenRequest)
+
+        override fun typeHeader(tokenRequest: TokenRequest, authRequestParams: Map<String, String>): String =
+            oAuth2TokenCallback.typeHeader(tokenRequest, authRequestParams)
 
         override fun audience(tokenRequest: TokenRequest): List<String> = oAuth2TokenCallback.audience(tokenRequest)
 
+        override fun audience(tokenRequest: TokenRequest, authRequestParams: Map<String, String>): List<String> =
+            oAuth2TokenCallback.audience(tokenRequest, authRequestParams)
+
         override fun addClaims(tokenRequest: TokenRequest): Map<String, Any> =
-            oAuth2TokenCallback.addClaims(tokenRequest).toMutableMap().apply {
+            addClaims(tokenRequest, emptyMap())
+
+        override fun addClaims(tokenRequest: TokenRequest, authRequestParams: Map<String, String>): Map<String, Any> =
+            oAuth2TokenCallback.addClaims(tokenRequest, authRequestParams).toMutableMap().apply {
                 login.claims?.let {
                     try {
                         jsonMapper
@@ -145,14 +170,3 @@ internal class AuthorizationCodeHandler(
         override fun tokenExpiry(): Long = oAuth2TokenCallback.tokenExpiry()
     }
 }
-
-/**
- * Returns a copy of this callback enriched with additional params from the original auth request.
- * For [RequestMappingTokenCallback] the extra params are available for both requestParam matching
- * and \${key} template substitution in claim values. Other callback types are returned unchanged.
- */
-private fun OAuth2TokenCallback.withAuthRequestParams(params: Map<String, String>): OAuth2TokenCallback =
-    when (this) {
-        is RequestMappingTokenCallback -> this.copy(extraParams = params)
-        else -> this
-    }
